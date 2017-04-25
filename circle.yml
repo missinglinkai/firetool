@@ -1,0 +1,58 @@
+machine:
+  post:
+    - pyenv global 2.7.12 3.5.3
+
+dependencies:
+  pre:
+    - /opt/circleci/python/3.5.3/bin/pip install --upgrade pip
+    - /opt/circleci/python/2.7.12/bin/pip install --upgrade pip
+
+  override:
+    - $PYENV_ROOT/versions/2.7.12/bin/pip install --requirement dev-requirements.txt
+    - $PYENV_ROOT/versions/3.5.3/bin/pip install --requirement dev-requirements.txt
+  cache_directories:
+    - /opt/circleci/python/2.7.12/lib/python2.7/site-packages
+    - /opt/circleci/python/3.5.3/lib/python3.5/site-packages
+
+
+test:
+  override:
+    - "true"
+
+deployment:
+  staging:
+    branch: develop
+    commands:
+      - /opt/circleci/python/3.5.3/bin/pip install --force --upgrade wheel
+      - PIP_KEYWORDS=test PIP_BUILD=$CIRCLE_BUILD_NUM /opt/circleci/python/3.5.3/bin/python setup.py sdist
+      - PIP_KEYWORDS=test PIP_BUILD=$CIRCLE_BUILD_NUM /opt/circleci/python/3.5.3/bin/python setup.py bdist_wheel --universal
+      - /opt/circleci/python/3.5.3/bin/pip install dist/*.whl && /opt/circleci/python/3.5.3/bin/firetool
+      - /opt/circleci/python/2.7.12/bin/pip install dist/*.whl && /opt/circleci/python/2.7.12/bin/firetool
+
+      - /opt/circleci/python/3.5.3/bin/pip install --force --upgrade twine
+      - |
+        if [ -z "$CI_PULL_REQUEST" ]; then
+          /opt/circleci/python/3.5.3/bin/twine upload --user $PYPI_TEST_USER --password $PYPI_TEST_USER_PASSWORD --repository-url https://testpypi.python.org/pypi --repository testpypi dist/firetool-*
+        fi
+
+  release:
+    branch: master
+    commands:
+      - /opt/circleci/python/3.5.3/bin/pip install --force --upgrade wheel
+      - PIP_KEYWORDS=prod PIP_BUILD=$CIRCLE_BUILD_NUM /opt/circleci/python/3.5.3/bin/python setup.py sdist
+      - PIP_KEYWORDS=prod PIP_BUILD=$CIRCLE_BUILD_NUM /opt/circleci/python/3.5.3/bin/python setup.py bdist_wheel --universal
+      - /opt/circleci/python/3.5.3/bin/pip install dist/*.whl && /opt/circleci/python/3.5.3/bin/firetool
+      - /opt/circleci/python/2.7.12/bin/pip install dist/*.whl && /opt/circleci/python/2.7.12/bin/firetool
+
+      - /opt/circleci/python/3.5.3/bin/pip install --force --upgrade twine
+      - |
+        if [ -z "$CI_PULL_REQUEST" ]; then
+          /opt/circleci/python/3.5.3/bin/twine upload --user $PYPI_USER --password $PYPI_USER_PASSWORD dist/firetool-*
+
+          /opt/circleci/python/3.5.3/bin/pip install firetool
+          /opt/circleci/python/3.5.3/bin/python -m firetool
+
+          /opt/circleci/python/2.7.12/bin/pip install firetool
+          /opt/circleci/python/2.7.12/bin/python -m firetool
+        fi
+
