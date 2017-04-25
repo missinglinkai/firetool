@@ -1,7 +1,13 @@
 Firetool is a command line tool to preform batch operation on Firebase realtime database  
 It can preform list/copy/delete on the entire database in parallel  
    
-For example les assume the following db:
+
+ - Installing:
+
+       pip install firetool  
+       # tested on Python2.7 and Python 3.5
+       
+For example assume the following db:
 
      root      
      └─ days      
