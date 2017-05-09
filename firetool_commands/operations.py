@@ -7,14 +7,20 @@ from firetool_commands.auth import get_firebase
 from firetool_commands.common import iterate_path, join_or_raise
 
 
-def display_values(firebase_root, root_path, throw_exceptions=True, shallow=False):
+def display_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False):
+    def return_none():
+        return None
+
     def inner():
         for current_path, current_groups in iterate_path(firebase_root, root_path):
             if shallow:
                 yield current_path, current_groups, None
                 continue
 
-            yield current_path, current_groups, gevent.spawn(firebase_root.get, current_path)
+            if keys_only:
+                yield current_path, current_groups, gevent.spawn(return_none)
+            else:
+                yield current_path, current_groups, gevent.spawn(firebase_root.get, current_path)
 
     futures = []
     for params in inner():
@@ -50,7 +56,7 @@ def delete_values(firebase_root, path, dry=False):
         yield p, join_or_raise(f)
 
 
-def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False):
+def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None):
     def fill_wildcards(p, groups):
         for i, g in enumerate(groups):
             p = p.replace('\{}'.format(i+1), g)
@@ -60,12 +66,17 @@ def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False):
     def no_op(val):
         return val
 
+    keys_only = set_value is not None
+
     def inner_copy_values():
-        for current_path, groups, val in display_values(firebase_root, src_path):
+        for current_path, groups, val in display_values(firebase_root, src_path, keys_only=keys_only):
             if processor:
                 val = processor(current_path, val)
 
             dest_path_full = fill_wildcards(dest_path, groups)
+
+            if set_value is not None:
+               val = fill_wildcards(set_value, groups)
 
             if dry:
                 yield current_path, dest_path_full, gevent.spawn(no_op, val)
@@ -131,20 +142,27 @@ def display_op(*args, **kwargs):
 @click.option('--dest','-d', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
+@click.option('--value', default=False)
 def copy_op(*args, **kwargs):
     src_path = kwargs['src']
     dest_path = kwargs['dest']
     project = kwargs['project']
     dry = kwargs.get('dry')
+    set_value = kwargs.get('value')
 
-    for src_path, dest_path, value in copy_values(get_firebase(project), src_path, dest_path, dry=dry):
+    for src_path, dest_path, value in copy_values(get_firebase(project), src_path, dest_path, dry=dry, set_value=set_value):
         if value is None:
             continue
 
         if isinstance(value, Exception):
             continue
 
-        click.echo("%s => %s size: %s" % (src_path, dest_path, len(json.dumps(value))))
+        output_data = json.dumps(value)
+
+        if len(output_data) > 1024:
+            click.echo("%s => %s size: %s" % (src_path, dest_path, len(output_data)))
+        else:
+            click.echo("%s => %s %s" % (src_path, dest_path, output_data))
 
 
 @operations_commands.command('delete')
@@ -152,7 +170,7 @@ def copy_op(*args, **kwargs):
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
-def copy_op(*args, **kwargs):
+def delete_op(*args, **kwargs):
     path = kwargs['path']
     project = kwargs['project']
     dry = kwargs.get('dry')
