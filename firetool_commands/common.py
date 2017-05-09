@@ -137,7 +137,7 @@ def iterate_path(firebase_root, path):
                 continue
 
             elements[1] = child_key
-            groups = current_groups or []
+            groups = current_groups[:] if current_groups is not None else []
             groups.extend(m.groups())
 
             yield gevent.spawn(inner, '/'.join(elements), groups)

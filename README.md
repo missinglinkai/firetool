@@ -1,7 +1,12 @@
-Firetool is a command line tool to preform batch operation on Firebase realtime database  
-It can preform list/copy/delete on the entire database in parallel  
-   
-For example les assume the following db:
+firetool is a command line tool to perform batch operation on Firebase real time database
+It can perform list/copy/delete on the entire database in parallel.   
+
+ - Installing:
+
+       pip install firetool  
+       # tested on Python2.7 and Python 3.5
+       
+For example assume the following db:
 
      root      
      └─ days      
@@ -47,7 +52,7 @@ For example les assume the following db:
  - Delete:
 
        firetool op delete --path "days/(\d{4})-(\d\d)-(\d\d)" --project {project}       
-       # This will delete all the nodes that mathes the --path regex
+       # This will delete all the nodes that matches the --path regex
         
  - Remarks        
     - The operations copy and delete has the --dry switch to prevent from the operation to be destructive
