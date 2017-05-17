@@ -4,23 +4,58 @@ import click
 import gevent
 import six
 from firetool_commands.auth import get_firebase
-from firetool_commands.common import iterate_path, join_or_raise
+from firetool_commands.common import iterate_path, join_or_raise, is_group_element, group_element_to_children_keys
+
+
+def get_and_join(firebase_root, path, child_keys, throw_exceptions=True):
+    futures = []
+
+    for key in child_keys:
+        current_path = path + '/' + key
+        f = gevent.spawn(firebase_root.get, current_path)
+        futures.append(f)
+
+    result = {}
+    for key, future in zip(child_keys, futures):
+        result[key] = join_or_raise(future, throw_exceptions=throw_exceptions)
+
+    return result
+
+
+def no_op(val):
+    return val
+
+
+# noinspection PyUnusedLocal
+def return_get_none(firebase_root, current_path, current_groups, throw_exceptions=True):
+    return current_path, current_groups, gevent.spawn(no_op, None)
+
+
+def firebase_get(firebase_root, current_path, current_groups, throw_exceptions=True):
+    elements = current_path.split('/')
+
+    if is_group_element(elements[-1]):
+        path = '/'.join(elements[:-1])
+        return path, current_groups, gevent.spawn(
+            get_and_join, firebase_root, path, group_element_to_children_keys(elements[-1]),
+            throw_exceptions=throw_exceptions)
+    else:
+        return current_path, current_groups, gevent.spawn(firebase_root.get, current_path)
 
 
 def display_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False):
-    def return_none():
-        return None
-
     def inner():
-        for current_path, current_groups in iterate_path(firebase_root, root_path):
+        for current_path, current_groups in iterate_path(firebase_root, root_path, keys_only=keys_only):
             if shallow:
                 yield current_path, current_groups, None
                 continue
 
-            if keys_only:
-                yield current_path, current_groups, gevent.spawn(return_none)
-            else:
-                yield current_path, current_groups, gevent.spawn(firebase_root.get, current_path)
+            gen_future = return_get_none if keys_only else firebase_get
+
+            current_path, current_groups, future = gen_future(
+                firebase_root, current_path, current_groups, throw_exceptions)
+
+            yield current_path, current_groups, future
 
     futures = []
     for params in inner():
@@ -39,9 +74,6 @@ def display_values(firebase_root, root_path, throw_exceptions=True, shallow=Fals
 
 
 def delete_values(firebase_root, path, dry=False):
-    def no_op(val):
-        return val
-
     futures = []
 
     for p in iterate_path(firebase_root, path):
@@ -105,16 +137,13 @@ def operations_commands():
     pass
 
 
-@operations_commands.command('display')
+@operations_commands.command('list')
 @click.pass_context
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
-def display_op(*args, **kwargs):
-    path = kwargs['path']
-    project = kwargs['project']
-    shallow = kwargs['shallow']
-
+@click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='csv', required=False)
+def display_op(ctx, path, project, shallow, outputformat):
     def nice_string(d):
         if isinstance(d, six.string_types):
             return d
@@ -126,6 +155,8 @@ def display_op(*args, **kwargs):
 
     firebase = get_firebase(project)
 
+    header_keys = None
+
     for path, groups, value in display_values(firebase, path, throw_exceptions=False, shallow=shallow):
         if value is None:
             continue
@@ -133,7 +164,19 @@ def display_op(*args, **kwargs):
         if isinstance(value, Exception):
             continue
 
-        click.echo("%s: %s" % (path, nice_string(value)))
+        if outputformat == 'csv':
+            if header_keys is None:
+                header_keys = value.keys()
+                header_keys.insert(0, 'path')
+                click.echo(','.join(header_keys))
+
+            values = [path]
+            for key in header_keys[1:]:
+                values.append(value.get(key) or '')
+
+            click.echo(','.join(values))
+        else:
+            click.echo("%s: %s" % (path, nice_string(value)))
 
 
 @operations_commands.command('copy')
@@ -143,14 +186,8 @@ def display_op(*args, **kwargs):
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
 @click.option('--value', default=False)
-def copy_op(*args, **kwargs):
-    src_path = kwargs['src']
-    dest_path = kwargs['dest']
-    project = kwargs['project']
-    dry = kwargs.get('dry')
-    set_value = kwargs.get('value')
-
-    for src_path, dest_path, value in copy_values(get_firebase(project), src_path, dest_path, dry=dry, set_value=set_value):
+def copy_op(ctx, src, dest, project, dry, value):
+    for src, dest, value in copy_values(get_firebase(project), src, dest, dry=dry, set_value=value):
         if value is None:
             continue
 
@@ -160,9 +197,9 @@ def copy_op(*args, **kwargs):
         output_data = json.dumps(value)
 
         if len(output_data) > 1024:
-            click.echo("%s => %s size: %s" % (src_path, dest_path, len(output_data)))
+            click.echo("%s => %s size: %s" % (src, dest, len(output_data)))
         else:
-            click.echo("%s => %s %s" % (src_path, dest_path, output_data))
+            click.echo("%s => %s %s" % (src, dest, output_data))
 
 
 @operations_commands.command('delete')
@@ -170,11 +207,7 @@ def copy_op(*args, **kwargs):
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
-def delete_op(*args, **kwargs):
-    path = kwargs['path']
-    project = kwargs['project']
-    dry = kwargs.get('dry')
-
+def delete_op(ctx, path, project, dry):
     for deleted_path, value in delete_values(get_firebase(project), path, dry=dry):
         if isinstance(value, Exception):
             continue

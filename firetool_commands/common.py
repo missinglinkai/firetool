@@ -13,6 +13,10 @@ def is_group_element(element):
     return element.startswith('{')
 
 
+def group_element_to_children_keys(element):
+    return element.replace('{', '').replace('}', '').split(',')
+
+
 def is_spacial_element(element):
     return is_wildcard_element(element) or is_group_element(element)
 
@@ -97,7 +101,7 @@ def return_final_result(method):
                 new_futures.append(future_or_string)
 
 
-def iterate_path(firebase_root, path):
+def iterate_path(firebase_root, path, keys_only=False):
     def inner(current_path, groups=None):
         elements = get_elements(current_path)
 
@@ -115,7 +119,13 @@ def iterate_path(firebase_root, path):
             return
 
         if is_group_element(elements[1]):
-            children_names = elements[1].replace('{', '').replace('}', '').split(',')
+            is_leaf_element = len(elements) == 2
+
+            if is_leaf_element and not keys_only:
+                yield '/'.join(elements), groups
+                return
+
+            children_names = group_element_to_children_keys(elements[1])
 
             for child_key in children_names:
                 elements[1] = child_key
