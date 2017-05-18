@@ -142,17 +142,8 @@ def operations_commands():
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
-@click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='csv', required=False)
-def display_op(ctx, path, project, shallow, outputformat):
-    def nice_string(d):
-        if isinstance(d, six.string_types):
-            return d
-
-        if isinstance(d, six.integer_types):
-            return d
-
-        return json.dumps(value, indent=2, sort_keys=True)
-
+@click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='json', required=False)
+def list_op(ctx, path, project, shallow, outputformat):
     firebase = get_firebase(project)
 
     header_keys = None
@@ -176,7 +167,11 @@ def display_op(ctx, path, project, shallow, outputformat):
 
             click.echo(','.join(values))
         else:
-            click.echo("%s: %s" % (path, nice_string(value)))
+            data = {
+                path: value,
+            }
+
+            click.echo(json.dumps(data))
 
 
 @operations_commands.command('copy')
