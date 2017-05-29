@@ -1,7 +1,11 @@
 # coding=utf-8
+import types
+
 import gevent
 import re
 import requests
+from gevent.pool import Pool
+
 from firetool_commands.base_root_core import FirebaseRootCore
 
 
@@ -54,9 +58,13 @@ class RequestsWrapper(object):
 class PlainFirebaseRoot(FirebaseRootCore):
     def __init__(self, firebase_root):
         super(PlainFirebaseRoot, self).__init__(firebase_root)
+        self.pool = Pool(50)
 
     def get_http(self):
         return RequestsWrapper(self._firebase_root)
+
+    def spawn(self, *args, **kwargs):
+        return self.pool.spawn(*args, **kwargs)
 
 
 def get_elements(path):
@@ -81,7 +89,11 @@ def get_elements(path):
 
 def return_final_result(method):
     new_futures = []
+
     for future_or_string in method():
+        if future_or_string is None:
+            continue
+
         if isinstance(future_or_string, tuple):
             yield future_or_string
             continue
@@ -89,19 +101,45 @@ def return_final_result(method):
         new_futures.append(future_or_string)
 
     while len(new_futures) > 0:
-        gevent.joinall(new_futures)
-        current_futures = new_futures[:]
-        new_futures = []
-        for f in current_futures:
+        gevent.wait(new_futures, count=1)
+        ready_indexes = [i for i, ff in enumerate(new_futures) if ff.ready()]
+        for i in ready_indexes:
+            f = new_futures[i]
+            new_futures[i] = None
+
+            if f.value is None:
+                continue
+
+            if isinstance(f.value, gevent.Greenlet):
+                new_futures.append(f.value)
+                continue
+
+            if not isinstance(f.value, types.GeneratorType):
+                yield f.value
+                continue
+
             for future_or_string in f.value:
                 if isinstance(future_or_string, tuple):
                     yield future_or_string
                     continue
+                elif isinstance(future_or_string, gevent.Greenlet):
+                    new_futures.append(future_or_string)
 
-                new_futures.append(future_or_string)
+        new_futures = [ff for ff in new_futures if ff is not None]
 
 
-def iterate_path(firebase_root, path, keys_only=False):
+def fill_wildcards(p, groups):
+    for i, g in enumerate(groups):
+        p = p.replace('\{}'.format(i+1), g)
+
+    return p
+
+
+def no_op(val):
+    return val
+
+
+def iterate_path(firebase_root, path, keys_only=False, condition=None):
     def inner(current_path, groups=None):
         elements = get_elements(current_path)
 
@@ -134,25 +172,47 @@ def iterate_path(firebase_root, path, keys_only=False):
                     yield params
 
     def spawn_iterate(start_path, elements, current_groups):
-        children_names = firebase_root.get(start_path, shallow=True)
+        def wrap_return_child(elements, current_groups):
+            def return_child(children_names):
+                if children_names is None:
+                    return
 
-        if children_names is None:
-            return
+                pattern = elements[1]
+                for child_key in children_names.keys():
+                    m = re.search(pattern, child_key)
 
-        pattern = elements[1]
-        for child_key in children_names.keys():
-            m = re.search(pattern, child_key)
+                    if m is None:
+                        continue
 
-            if m is None:
-                continue
+                    elements[1] = child_key
+                    groups = current_groups[:] if current_groups is not None else []
+                    groups.extend(m.groups())
 
-            elements[1] = child_key
-            groups = current_groups[:] if current_groups is not None else []
-            groups.extend(m.groups())
+                    yield gevent.spawn(inner, '/'.join(elements), groups)
 
-            yield gevent.spawn(inner, '/'.join(elements), groups)
+            return return_child
 
-    for result in return_final_result(lambda: inner(path)):
+        yield firebase_root.spawn(firebase_root.get, start_path, shallow=True, post_process=wrap_return_child(elements, current_groups))
+
+    def get_paths():
+        for result_or_future in return_final_result(lambda: inner(path)):
+            if condition is None:
+                yield gevent.spawn(no_op, result_or_future)
+
+            _, current_groups = result_or_future
+
+            def eval_and_get(path_condition_expended, result):
+                condition_value = firebase_root.get(path_condition_expended)
+                if condition_value is None:
+                    return None
+
+                return result
+
+            condition_expended = fill_wildcards(condition, current_groups)
+
+            yield gevent.spawn(eval_and_get, condition_expended, result_or_future)
+
+    for result in return_final_result(lambda: get_paths()):
         yield result
 
 
