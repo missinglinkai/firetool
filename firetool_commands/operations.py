@@ -2,9 +2,9 @@
 import json
 import click
 import gevent
-import six
 from firetool_commands.auth import get_firebase
-from firetool_commands.common import iterate_path, join_or_raise, is_group_element, group_element_to_children_keys
+from firetool_commands.common import iterate_path, join_or_raise, is_group_element, group_element_to_children_keys, \
+    fill_wildcards, no_op
 
 
 def get_and_join(firebase_root, path, child_keys, throw_exceptions=True):
@@ -12,7 +12,7 @@ def get_and_join(firebase_root, path, child_keys, throw_exceptions=True):
 
     for key in child_keys:
         current_path = path + '/' + key
-        f = gevent.spawn(firebase_root.get, current_path)
+        f = firebase_root.spawn(firebase_root.get, current_path)
         futures.append(f)
 
     result = {}
@@ -22,65 +22,50 @@ def get_and_join(firebase_root, path, child_keys, throw_exceptions=True):
     return result
 
 
-def no_op(val):
-    return val
-
-
 # noinspection PyUnusedLocal
-def return_get_none(firebase_root, current_path, current_groups, throw_exceptions=True):
-    return current_path, current_groups, gevent.spawn(no_op, None)
+def return_get_none(current_path):
+    return gevent.spawn(no_op, None)
 
 
-def firebase_get(firebase_root, current_path, current_groups, throw_exceptions=True):
+def firebase_get(firebase_root, current_path, throw_exceptions=True):
     elements = current_path.split('/')
 
-    if is_group_element(elements[-1]):
+    last_element = elements[-1]
+    if is_group_element(last_element):
         path = '/'.join(elements[:-1])
-        return path, current_groups, gevent.spawn(
-            get_and_join, firebase_root, path, group_element_to_children_keys(elements[-1]),
+        return gevent.spawn(
+            get_and_join, firebase_root, path, group_element_to_children_keys(last_element),
             throw_exceptions=throw_exceptions)
     else:
-        return current_path, current_groups, gevent.spawn(firebase_root.get, current_path)
+        return firebase_root.spawn(firebase_root.get, current_path)
 
 
-def display_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False):
+def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None):
     def inner():
-        for current_path, current_groups in iterate_path(firebase_root, root_path, keys_only=keys_only):
-            if shallow:
-                yield current_path, current_groups, None
-                continue
+        for iterate_current_path, iterate_current_groups in iterate_path(
+                firebase_root, root_path, keys_only=keys_only, condition=condition):
 
-            gen_future = return_get_none if keys_only else firebase_get
+            def return_value():
+                if shallow or keys_only:
+                    return {}
 
-            current_path, current_groups, future = gen_future(
-                firebase_root, current_path, current_groups, throw_exceptions)
+                f = firebase_get(firebase_root, iterate_current_path, throw_exceptions=throw_exceptions)
+                return join_or_raise(f, throw_exceptions)
 
-            yield current_path, current_groups, future
+            yield iterate_current_path, iterate_current_groups, return_value()
 
-    futures = []
-    for params in inner():
-        futures.append(params)
-
-        if len(futures) < 50:
-            continue
-
-        for root_path, groups, future in futures:
-            yield root_path, groups, join_or_raise(future, throw_exceptions=throw_exceptions)
-
-        futures = []
-
-    for root_path, groups, future in futures:
-        yield root_path, groups, join_or_raise(future, throw_exceptions=throw_exceptions)
+    for current_root_path, current_groups, value in inner():
+        yield current_root_path, current_groups, value
 
 
-def delete_values(firebase_root, path, dry=False):
+def delete_values(firebase_root, path, dry=False, condition=None):
     futures = []
 
-    for p in iterate_path(firebase_root, path):
+    for p in iterate_path(firebase_root, path, condition=condition):
         if dry:
             future = gevent.spawn(no_op,  None)
         else:
-            future = gevent.spawn(firebase_root.delete, p[0])
+            future = firebase_root.spawn(firebase_root.delete, p[0])
 
         futures.append((p[0], future))
 
@@ -88,33 +73,25 @@ def delete_values(firebase_root, path, dry=False):
         yield p, join_or_raise(f)
 
 
-def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None):
-    def fill_wildcards(p, groups):
-        for i, g in enumerate(groups):
-            p = p.replace('\{}'.format(i+1), g)
-
-        return p
-
-    def no_op(val):
-        return val
-
+def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None, condition=None):
     keys_only = set_value is not None
 
     def inner_copy_values():
-        for current_path, groups, val in display_values(firebase_root, src_path, keys_only=keys_only):
+        list_generator = list_values(firebase_root, src_path, keys_only=keys_only, condition=condition)
+        for current_path, current_groups, val in list_generator:
             if processor:
                 val = processor(current_path, val)
 
-            dest_path_full = fill_wildcards(dest_path, groups)
+            dest_path_full = fill_wildcards(dest_path, current_groups)
 
             if set_value is not None:
-               val = fill_wildcards(set_value, groups)
+               val = fill_wildcards(set_value, current_groups)
 
             if dry:
                 yield current_path, dest_path_full, gevent.spawn(no_op, val)
                 continue
 
-            yield current_path, dest_path_full, gevent.spawn(firebase_root.put, dest_path_full, val)
+            yield current_path, dest_path_full, firebase_root.spawn(firebase_root.put, dest_path_full, val)
 
     futures = []
     for params in inner_copy_values():
@@ -138,17 +115,18 @@ def operations_commands():
 
 
 @operations_commands.command('list')
-@click.pass_context
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
 @click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='json', required=False)
-def list_op(ctx, path, project, shallow, outputformat):
+@click.option('--condition', required=False)
+def list_op(path, project, shallow, outputformat, condition):
     firebase = get_firebase(project)
 
     header_keys = None
 
-    for path, groups, value in display_values(firebase, path, throw_exceptions=False, shallow=shallow):
+    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition)
+    for path, groups, value in list_generator:
         if value is None:
             continue
 
@@ -175,14 +153,15 @@ def list_op(ctx, path, project, shallow, outputformat):
 
 
 @operations_commands.command('copy')
-@click.pass_context
 @click.option('--src', '-s', required=True)
-@click.option('--dest','-d', required=True)
+@click.option('--dest', '-d', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
 @click.option('--value', default=False)
-def copy_op(ctx, src, dest, project, dry, value):
-    for src, dest, value in copy_values(get_firebase(project), src, dest, dry=dry, set_value=value):
+@click.option('--condition', required=False)
+def copy_op(src, dest, project, dry, value, condition):
+    copy_generator = copy_values(get_firebase(project), src, dest, dry=dry, set_value=value, condition=condition)
+    for src, dest, value in copy_generator:
         if value is None:
             continue
 
@@ -198,13 +177,14 @@ def copy_op(ctx, src, dest, project, dry, value):
 
 
 @operations_commands.command('delete')
-@click.pass_context
-@click.option('--path', required=True)
+@click.option('--path', required=True, multiple=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
-def delete_op(ctx, path, project, dry):
-    for deleted_path, value in delete_values(get_firebase(project), path, dry=dry):
-        if isinstance(value, Exception):
-            continue
+@click.option('--condition', required=False)
+def delete_op(path, project, dry, condition):
+    for current_path in path:
+        for deleted_path, value in delete_values(get_firebase(project), current_path, dry=dry, condition=condition):
+            if isinstance(value, Exception):
+                continue
 
-        click.echo("delete %s" % deleted_path)
+            click.echo("delete %s" % deleted_path)
