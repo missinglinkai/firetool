@@ -1,7 +1,10 @@
 # coding=utf-8
+import csv
 import json
 import click
 import gevent
+import six
+
 from firetool_commands.auth import get_firebase
 from firetool_commands.common import iterate_path, join_or_raise, is_group_element, group_element_to_children_keys, \
     fill_wildcards, no_op
@@ -40,10 +43,10 @@ def firebase_get(firebase_root, current_path, throw_exceptions=True):
         return firebase_root.spawn(firebase_root.get, current_path)
 
 
-def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None):
+def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False):
     def inner():
         for iterate_current_path, iterate_current_groups in iterate_path(
-                firebase_root, root_path, keys_only=keys_only, condition=condition):
+                firebase_root, root_path, keys_only=keys_only, condition=condition, descending_order=descending_order):
 
             def return_value():
                 if shallow or keys_only:
@@ -114,18 +117,27 @@ def operations_commands():
     pass
 
 
+def write_csv_line(values):
+    output = six.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(values)
+
+    click.echo(output.getvalue(), nl=False)
+
+
 @operations_commands.command('list')
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
 @click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='json', required=False)
 @click.option('--condition', required=False)
-def list_op(path, project, shallow, outputformat, condition):
+@click.option('--desc/--asc', required=False)
+def list_op(path, project, shallow, outputformat, condition, desc):
     firebase = get_firebase(project)
 
     header_keys = None
 
-    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition)
+    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc)
     for path, groups, value in list_generator:
         if value is None:
             continue
@@ -137,13 +149,13 @@ def list_op(path, project, shallow, outputformat, condition):
             if header_keys is None:
                 header_keys = value.keys()
                 header_keys.insert(0, 'path')
-                click.echo(','.join(header_keys))
+                write_csv_line(header_keys)
 
             values = [path]
             for key in header_keys[1:]:
                 values.append(value.get(key) or '')
 
-            click.echo(','.join(values))
+            write_csv_line(values)
         else:
             data = {
                 path: value,

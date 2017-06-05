@@ -139,7 +139,11 @@ def no_op(val):
     return val
 
 
-def iterate_path(firebase_root, path, keys_only=False, condition=None):
+def natural_key(string_):
+    return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', string_)]
+
+
+def iterate_path(firebase_root, path, keys_only=False, condition=None, descending_order=False):
     def inner(current_path, groups=None):
         elements = get_elements(current_path)
 
@@ -178,7 +182,12 @@ def iterate_path(firebase_root, path, keys_only=False, condition=None):
                     return
 
                 pattern = elements[1]
-                for child_key in children_names.keys():
+
+                children_names = children_names.keys()
+
+                children_names = sorted(children_names, reverse=descending_order, key=natural_key)
+
+                for child_key in children_names:
                     m = re.search(pattern, child_key)
 
                     if m is None:
@@ -197,7 +206,8 @@ def iterate_path(firebase_root, path, keys_only=False, condition=None):
     def get_paths():
         for result_or_future in return_final_result(lambda: inner(path)):
             if condition is None:
-                yield gevent.spawn(no_op, result_or_future)
+                yield result_or_future
+                continue
 
             _, current_groups = result_or_future
 
