@@ -123,9 +123,13 @@ class FirebaseRootCore(object):
             return self._json_method_url(method, url, args[-1])
 
     def get(self, *args, **kwargs):
-        self.gets += 1
+        post_process = kwargs.get('post_process')
+        result = self.json_method("GET", *args, **kwargs)
 
-        return self.json_method("GET", *args, **kwargs)
+        if post_process is None:
+            return result
+
+        return post_process(result)
 
     def put(self, *args, **kwargs):
         return self.json_method("PUT", *args, **kwargs)
