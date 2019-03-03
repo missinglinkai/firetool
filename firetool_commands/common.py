@@ -1,4 +1,6 @@
 # coding=utf-8
+import time
+
 import types
 
 import gevent
@@ -50,7 +52,13 @@ class RequestsWrapper(object):
         if 'redirections' in kwargs:
             del kwargs['redirections']
 
-        rs = requests.request(method, url, data=data, **kwargs)
+        while True:
+            try:
+                rs = requests.request(method, url, data=data, **kwargs)
+                break
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError):
+                time.sleep(2.0)
+                continue
 
         return RequestsResponseWrapper(rs), rs.content
 
@@ -128,9 +136,18 @@ def return_final_result(method):
         new_futures = [ff for ff in new_futures if ff is not None]
 
 
-def fill_wildcards(p, groups):
-    for i, g in enumerate(groups):
-        p = p.replace('\{}'.format(i+1), g)
+def fill_wildcards(p, groups, values=None):
+    for i, g in enumerate(groups or []):
+        p = p.replace('\\{}'.format(i + 1), g)
+
+    for name, value in (values or {}).items():
+        if value is None:
+            continue
+
+        if '{%s}' % name not in p:
+            continue
+
+        p = p.replace('{%s}' % name, value)
 
     return p
 

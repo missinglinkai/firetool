@@ -43,7 +43,7 @@ def firebase_get(firebase_root, current_path, throw_exceptions=True):
         return firebase_root.spawn(firebase_root.get, current_path)
 
 
-def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False):
+def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False, test_eval=None):
     def inner():
         for iterate_current_path, iterate_current_groups in iterate_path(
                 firebase_root, root_path, keys_only=keys_only, condition=condition, descending_order=descending_order):
@@ -58,7 +58,25 @@ def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, 
             yield iterate_current_path, iterate_current_groups, return_value()
 
     for current_root_path, current_groups, value in inner():
+        if test_eval is not None and not eval(test_eval, {}, value):
+            continue
+
         yield current_root_path, current_groups, value
+
+
+def count_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False):
+    def inner():
+        for iterate_current_path, iterate_current_groups in iterate_path(
+                firebase_root, root_path, keys_only=keys_only, condition=condition, descending_order=descending_order):
+
+            total_keys = 0
+            for _ in iterate_path(firebase_root, iterate_current_path + '/(.*)', keys_only=True):
+                total_keys += 1
+
+            yield iterate_current_path, iterate_current_groups, total_keys
+
+    for current_root_path, current_groups, counter in inner():
+        yield current_root_path, counter
 
 
 def delete_values(firebase_root, path, dry=False, condition=None):
@@ -76,19 +94,23 @@ def delete_values(firebase_root, path, dry=False, condition=None):
         yield p, join_or_raise(f)
 
 
-def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None, condition=None):
-    keys_only = set_value is not None
-
+def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None, condition=None, test_eval=None):
     def inner_copy_values():
-        list_generator = list_values(firebase_root, src_path, keys_only=keys_only, condition=condition)
+        list_generator = list_values(firebase_root, src_path, condition=condition, test_eval=test_eval)
         for current_path, current_groups, val in list_generator:
             if processor:
                 val = processor(current_path, val)
 
-            dest_path_full = fill_wildcards(dest_path, current_groups)
+            dest_path_full = fill_wildcards(dest_path, current_groups, val)
 
             if set_value is not None:
-               val = fill_wildcards(set_value, current_groups)
+                val = fill_wildcards(set_value, current_groups, val)
+
+                if val:
+                    if val.lower() == 'true':
+                        val = True
+                    elif val.lower() == 'false':
+                        val = False
 
             if dry:
                 yield current_path, dest_path_full, gevent.spawn(no_op, val)
@@ -96,19 +118,7 @@ def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, s
 
             yield current_path, dest_path_full, firebase_root.spawn(firebase_root.put, dest_path_full, val)
 
-    futures = []
-    for params in inner_copy_values():
-        futures.append(params)
-
-        if len(futures) < 50:
-            continue
-
-        for root_path, groups, future in futures:
-            yield root_path, groups, join_or_raise(future)
-
-        futures = []
-
-    for root_path, groups, future in futures:
+    for root_path, groups, future in inner_copy_values():
         yield root_path, groups, join_or_raise(future)
 
 
@@ -125,6 +135,19 @@ def write_csv_line(values):
     click.echo(output.getvalue(), nl=False)
 
 
+@operations_commands.command('count')
+@click.option('--path', required=True)
+@click.option('--project', '-p', required=True)
+@click.option('--shallow/--no-shallow', default=False)
+@click.option('--condition', required=False)
+@click.option('--desc/--asc', required=False)
+def list_op(path, project, shallow, condition, desc):
+    firebase = get_firebase(project)
+
+    for key, total_keys in count_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc):
+        click.echo('%s: %s' % (key, total_keys))
+
+
 @operations_commands.command('list')
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
@@ -132,12 +155,13 @@ def write_csv_line(values):
 @click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='json', required=False)
 @click.option('--condition', required=False)
 @click.option('--desc/--asc', required=False)
-def list_op(path, project, shallow, outputformat, condition, desc):
+@click.option('--test-eval', required=False)
+def list_op(path, project, shallow, outputformat, condition, desc, test_eval):
     firebase = get_firebase(project)
 
     header_keys = None
 
-    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc)
+    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc, test_eval=test_eval)
     for path, groups, value in list_generator:
         if value is None:
             continue
@@ -147,13 +171,20 @@ def list_op(path, project, shallow, outputformat, condition, desc):
 
         if outputformat == 'csv':
             if header_keys is None:
-                header_keys = value.keys()
+                if isinstance(value, dict):
+                    header_keys = value.keys()
+                else:
+                    header_keys = ['value']
+
                 header_keys.insert(0, 'path')
                 write_csv_line(header_keys)
 
             values = [path]
-            for key in header_keys[1:]:
-                values.append(value.get(key) or '')
+            if isinstance(value, dict):
+                for key in header_keys[1:]:
+                    values.append(value.get(key) or '')
+            else:
+                values.append(value)
 
             write_csv_line(values)
         else:
@@ -171,8 +202,9 @@ def list_op(path, project, shallow, outputformat, condition, desc):
 @click.option('--dry/--no-dry', default=False)
 @click.option('--value', default=False)
 @click.option('--condition', required=False)
-def copy_op(src, dest, project, dry, value, condition):
-    copy_generator = copy_values(get_firebase(project), src, dest, dry=dry, set_value=value, condition=condition)
+@click.option('--test-eval', required=False)
+def copy_op(src, dest, project, dry, value, condition, test_eval):
+    copy_generator = copy_values(get_firebase(project), src, dest, dry=dry, set_value=value, condition=condition, test_eval=test_eval)
     for src, dest, value in copy_generator:
         if value is None:
             continue
