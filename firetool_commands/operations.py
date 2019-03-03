@@ -80,17 +80,16 @@ def count_values(firebase_root, root_path, throw_exceptions=True, shallow=False,
 
 
 def delete_values(firebase_root, path, dry=False, condition=None):
-    futures = []
+    def create_futures():
+        for p in iterate_path(firebase_root, path, condition=condition):
+            if dry:
+                future = gevent.spawn(no_op,  None)
+            else:
+                future = firebase_root.spawn(firebase_root.delete, p[0])
 
-    for p in iterate_path(firebase_root, path, condition=condition):
-        if dry:
-            future = gevent.spawn(no_op,  None)
-        else:
-            future = firebase_root.spawn(firebase_root.delete, p[0])
+            yield p[0], future
 
-        futures.append((p[0], future))
-
-    for p, f in futures:
+    for p, f in create_futures():
         yield p, join_or_raise(f)
 
 
