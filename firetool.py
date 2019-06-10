@@ -1,7 +1,8 @@
+#!/usr/bin/env python
 # coding=utf-8
 import click
 from gevent import monkey
-from firetool_commands import operations_commands
+from firetool_commands import delete_command, copy_command, list_command, count_command
 
 monkey.patch_all()
 
@@ -12,7 +13,10 @@ def cli(**kwargs):
     pass
 
 
-cli.add_command(operations_commands)
+cli.add_command(delete_command)
+cli.add_command(copy_command)
+cli.add_command(list_command)
+cli.add_command(count_command)
 
 
 if __name__ == "__main__":

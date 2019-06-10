@@ -1,6 +1,8 @@
 # coding=utf-8
 import csv
 import json
+from httplib import HTTPException
+
 import click
 import gevent
 import six
@@ -43,10 +45,10 @@ def firebase_get(firebase_root, current_path, throw_exceptions=True):
         return firebase_root.spawn(firebase_root.get, current_path)
 
 
-def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False, test_eval=None):
+def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False,descending_order=False, test_eval=None):
     def inner():
         for iterate_current_path, iterate_current_groups in iterate_path(
-                firebase_root, root_path, keys_only=keys_only, condition=condition, descending_order=descending_order):
+                firebase_root, root_path, keys_only=keys_only, descending_order=descending_order, test_eval=test_eval):
 
             def return_value():
                 if shallow or keys_only:
@@ -58,10 +60,31 @@ def list_values(firebase_root, root_path, throw_exceptions=True, shallow=False, 
             yield iterate_current_path, iterate_current_groups, return_value()
 
     for current_root_path, current_groups, value in inner():
-        if test_eval is not None and not eval(test_eval, {}, value):
+        yield current_root_path, current_groups, value
+
+
+def delete_values(firebase_root, path, throw_exceptions=True, dry=False, test_eval=None):
+    def delete_value(current_path):
+        if not dry:
+            firebase_root.delete(current_path)
+
+        return current_path
+
+    def create_futures():
+        for iterate_current_path, iterate_current_groups in iterate_path(firebase_root, path, test_eval=test_eval):
+            yield iterate_current_path, gevent.spawn(delete_value, iterate_current_path)
+
+    for current_root_path, f in create_futures():
+        try:
+            val = join_or_raise(f)
+        except HTTPException as ex:
+            print('%s: %s' % (ex, current_root_path, ))
             continue
 
-        yield current_root_path, current_groups, value
+        if not val:
+            continue
+
+        yield current_root_path, val
 
 
 def count_values(firebase_root, root_path, throw_exceptions=True, shallow=False, keys_only=False, condition=None, descending_order=False):
@@ -77,20 +100,6 @@ def count_values(firebase_root, root_path, throw_exceptions=True, shallow=False,
 
     for current_root_path, current_groups, counter in inner():
         yield current_root_path, counter
-
-
-def delete_values(firebase_root, path, dry=False, condition=None):
-    def create_futures():
-        for p in iterate_path(firebase_root, path, condition=condition):
-            if dry:
-                future = gevent.spawn(no_op,  None)
-            else:
-                future = firebase_root.spawn(firebase_root.delete, p[0])
-
-            yield p[0], future
-
-    for p, f in create_futures():
-        yield p, join_or_raise(f)
 
 
 def copy_values(firebase_root, src_path, dest_path, processor=None, dry=False, set_value=None, condition=None, test_eval=None):
@@ -134,33 +143,32 @@ def write_csv_line(values):
     click.echo(output.getvalue(), nl=False)
 
 
-@operations_commands.command('count')
+@click.command('count')
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
 @click.option('--condition', required=False)
 @click.option('--desc/--asc', required=False)
-def list_op(path, project, shallow, condition, desc):
+def count_command(path, project, shallow, condition, desc):
     firebase = get_firebase(project)
 
     for key, total_keys in count_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc):
         click.echo('%s: %s' % (key, total_keys))
 
 
-@operations_commands.command('list')
+@click.command('list')
 @click.option('--path', required=True)
 @click.option('--project', '-p', required=True)
 @click.option('--shallow/--no-shallow', default=False)
 @click.option('--outputFormat', '-o', type=click.Choice(['json', 'csv']), default='json', required=False)
-@click.option('--condition', required=False)
 @click.option('--desc/--asc', required=False)
 @click.option('--test-eval', required=False)
-def list_op(path, project, shallow, outputformat, condition, desc, test_eval):
+def list_command(path, project, shallow, outputformat, desc, test_eval):
     firebase = get_firebase(project)
 
     header_keys = None
 
-    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, condition=condition, descending_order=desc, test_eval=test_eval)
+    list_generator = list_values(firebase, path, throw_exceptions=False, shallow=shallow, descending_order=desc, test_eval=test_eval)
     for path, groups, value in list_generator:
         if value is None:
             continue
@@ -194,7 +202,7 @@ def list_op(path, project, shallow, outputformat, condition, desc, test_eval):
             click.echo(json.dumps(data))
 
 
-@operations_commands.command('copy')
+@click.command('copy')
 @click.option('--src', '-s', required=True)
 @click.option('--dest', '-d', required=True)
 @click.option('--project', '-p', required=True)
@@ -202,7 +210,7 @@ def list_op(path, project, shallow, outputformat, condition, desc, test_eval):
 @click.option('--value', default=False)
 @click.option('--condition', required=False)
 @click.option('--test-eval', required=False)
-def copy_op(src, dest, project, dry, value, condition, test_eval):
+def copy_command(src, dest, project, dry, value, condition, test_eval):
     copy_generator = copy_values(get_firebase(project), src, dest, dry=dry, set_value=value, condition=condition, test_eval=test_eval)
     for src, dest, value in copy_generator:
         if value is None:
@@ -219,14 +227,14 @@ def copy_op(src, dest, project, dry, value, condition, test_eval):
             click.echo("%s => %s %s" % (src, dest, output_data))
 
 
-@operations_commands.command('delete')
+@click.command('delete')
 @click.option('--path', required=True, multiple=True)
 @click.option('--project', '-p', required=True)
 @click.option('--dry/--no-dry', default=False)
-@click.option('--condition', required=False)
-def delete_op(path, project, dry, condition):
+@click.option('--test-eval', required=False)
+def delete_command(path, project, dry, test_eval):
     for current_path in path:
-        for deleted_path, value in delete_values(get_firebase(project), current_path, dry=dry, condition=condition):
+        for deleted_path, value in delete_values(get_firebase(project), current_path, dry=dry, test_eval=test_eval):
             if isinstance(value, Exception):
                 continue
 

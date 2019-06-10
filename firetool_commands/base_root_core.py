@@ -77,8 +77,7 @@ class FirebaseRootCore(object):
     @classmethod
     def validate_http_response(cls, response, content):
         if response.status >= 400:
-            logging.error("request failed %d %s", response.status, content)
-            raise httplib.HTTPException(content)
+            raise httplib.HTTPException(content, response)
 
     def on_request(self, url, method, body, headers):
         if method == 'NOPE':
@@ -106,11 +105,20 @@ class FirebaseRootCore(object):
             if shallow:
                 url += '?shallow=true'
 
-        try:
-            r = self.on_request(url, method, body, headers)
-        except httplib.HTTPException:
-            logging.error("The following request failed: (%s) %s\nbody: %s\nheaders: %s", method, url, body, headers)
-            raise
+        while True:
+            try:
+                r = self.on_request(url, method, body, headers)
+                break
+            except httplib.HTTPException as ex:
+                content, r = ex.args
+
+                if r.status == 504:
+                    print('%s, retrying' % (content, ))
+                    continue
+
+                logging.error("request failed %d %s", r.status, content)
+                logging.error("The following request failed: (%s) %s\nbody: %s\nheaders: %s", method, url, body, headers)
+                raise
 
         return r
 

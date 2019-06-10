@@ -22,15 +22,15 @@ For example assume the following db:
          
  - Listing:
   
-       firetool op list --path "days/(.*)/name" --project {project}       
+       firetool list --path "days/(.*)/name" --project {project}       
        # This will return the values nodes matching --path 
 
-       firetool op list --path "days/(.*)/{name, id}" --project {project}             
+       firetool list --path "days/(.*)/{name, id}" --project {project}             
        # This will return the values nodes matching --path 
 
  - Copy:
 
-       firetool op copy --src "days/(\d{4})-(\d\d)-(\d\d)" --dest "days/\1/\2/\3"" --project {project}        
+       firetool copy --src "days/(\d{4})-(\d\d)-(\d\d)" --dest "days/\1/\2/\3"" --project {project}        
        # This will iterate over all the nodes mataching --src (using regex)
        # and will copy the matching nodes into a --dest using regex groups matching
        # The new tree will have those new nodes                                     
@@ -51,7 +51,7 @@ For example assume the following db:
 
  - Delete:
 
-       firetool op delete --path "days/(\d{4})-(\d\d)-(\d\d)" --project {project}       
+       firetool delete --path "days/(\d{4})-(\d\d)-(\d\d)" --project {project}       
        # This will delete all the nodes that matches the --path regex
         
  - Remarks        

@@ -1,14 +1,97 @@
 # coding=utf-8
+import sys
 import time
-
+import datetime
 import types
-
+from contextlib import closing
 import gevent
 import re
 import requests
 from gevent.pool import Pool
 
 from firetool_commands.base_root_core import FirebaseRootCore
+
+
+def fill_wildcards(p, groups, values=None):
+    for i, g in enumerate(groups or []):
+        p = p.replace('\\{}'.format(i + 1), g)
+
+    for name, value in (values or {}).items():
+        if value is None:
+            continue
+
+        if '{%s}' % name not in p:
+            continue
+
+        p = p.replace('{%s}' % name, value)
+
+    return p
+
+
+class UpdateTimer(object):
+    def __init__(self, interval=1.):
+        self.__interval = interval
+        self.__start_time = None
+
+    def can_update(self):
+        now = datetime.datetime.utcnow()
+        if self.__start_time is None or (now - self.__start_time).total_seconds() > self.__interval:
+            self.__start_time = now
+            return True
+
+        return False
+
+
+class PrintStatus(object):
+    def __init__(self, nl_on_clone=True, fp=sys.stdout):
+        self.__update_timer = UpdateTimer()
+        self.__first_status = True
+        self.__last_printed_msg = None
+        self.__last_msg = None
+        self.__fp = fp
+        self.__nl_on_close = nl_on_clone
+
+    def close(self):
+        if self.__last_msg is not None and self.__last_msg != self.__last_printed_msg:
+            self.__print_status(True, self.__last_msg)
+
+        if self.__nl_on_close:
+            self.__print_to_out('\n')
+
+    def __get_formatted_message(self, msg, *args, **kwargs):
+        formatted_msg = ''
+
+        if self.__last_printed_msg:
+            spaces = len(self.__last_printed_msg)
+            formatted_msg += '\r' + (' ' * spaces) + '\r'
+
+        formatted_msg += msg.format(*args, **kwargs)
+
+        if self.__first_status:
+            formatted_msg = '\n' + formatted_msg
+
+        return formatted_msg
+
+    def __print_to_out(self, text):
+        self.__fp.write(text)
+        self.__fp.flush()
+
+    def __print_status(self, force, msg, *args, **kwargs):
+        formatted_msg = self.__get_formatted_message(msg, *args, **kwargs)
+
+        self.__last_msg = formatted_msg.strip()
+
+        if self.__update_timer.can_update() or force:
+            self.__print_to_out(formatted_msg)
+            self.__last_printed_msg = self.__last_msg
+
+        return True
+
+    def print_status(self, msg, *args, **kwargs):
+        printed_status = self.__print_status(False, msg, *args, **kwargs)
+
+        if self.__first_status and printed_status:
+            self.__first_status = False
 
 
 def is_wildcard_element(element):
@@ -136,22 +219,6 @@ def return_final_result(method):
         new_futures = [ff for ff in new_futures if ff is not None]
 
 
-def fill_wildcards(p, groups, values=None):
-    for i, g in enumerate(groups or []):
-        p = p.replace('\\{}'.format(i + 1), g)
-
-    for name, value in (values or {}).items():
-        if value is None:
-            continue
-
-        if '{%s}' % name not in p:
-            continue
-
-        p = p.replace('{%s}' % name, value)
-
-    return p
-
-
 def no_op(val):
     return val
 
@@ -160,28 +227,28 @@ def natural_key(string_):
     return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', string_)]
 
 
-def iterate_path(firebase_root, path, keys_only=False, condition=None, descending_order=False):
-    def inner(current_path, groups=None):
+def iterate_path(firebase_root, path, keys_only=False, test_eval=None, descending_order=False):
+    def inner(current_path, groups_with_progress=None):
         elements = get_elements(current_path)
 
         if len(elements) == 0:
             return
 
         if len(elements) == 1:
-            yield current_path, groups
+            yield current_path, groups_with_progress
             return
 
         start_path = elements[0]
 
         if is_wildcard_element(elements[1]):
-            yield gevent.spawn(spawn_iterate, start_path, elements[:], groups)
+            yield gevent.spawn(spawn_iterate, start_path, elements[:], groups_with_progress)
             return
 
         if is_group_element(elements[1]):
             is_leaf_element = len(elements) == 2
 
             if is_leaf_element and not keys_only:
-                yield '/'.join(elements), groups
+                yield '/'.join(elements), groups_with_progress
                 return
 
             children_names = group_element_to_children_keys(elements[1])
@@ -189,11 +256,11 @@ def iterate_path(firebase_root, path, keys_only=False, condition=None, descendin
             for child_key in children_names:
                 elements[1] = child_key
 
-                for params in inner('/'.join(elements), groups):
+                for params in inner('/'.join(elements), groups_with_progress):
                     yield params
 
-    def spawn_iterate(start_path, elements, current_groups):
-        def wrap_return_child(elements, current_groups):
+    def spawn_iterate(start_path, elements, current_groups_with_progress):
+        def wrap_return_child(elements, current_groups_with_progress):
             def return_child(children_names):
                 if children_names is None:
                     return
@@ -204,42 +271,51 @@ def iterate_path(firebase_root, path, keys_only=False, condition=None, descendin
 
                 children_names = sorted(children_names, reverse=descending_order, key=natural_key)
 
-                for child_key in children_names:
+                for i, child_key in enumerate(children_names):
                     m = re.search(pattern, child_key)
 
                     if m is None:
                         continue
 
                     elements[1] = child_key
-                    groups = current_groups[:] if current_groups is not None else []
-                    groups.extend(m.groups())
+                    groups_with_progress = current_groups_with_progress[:] if current_groups_with_progress is not None else []
+                    groups_with_progress.append((m.groups()[0], (i+1, len(children_names))))
 
-                    yield gevent.spawn(inner, '/'.join(elements), groups)
+                    yield gevent.spawn(inner, '/'.join(elements), groups_with_progress)
 
             return return_child
 
-        yield firebase_root.spawn(firebase_root.get, start_path, shallow=True, post_process=wrap_return_child(elements, current_groups))
+        yield firebase_root.spawn(firebase_root.get, start_path, shallow=True, post_process=wrap_return_child(elements, current_groups_with_progress))
 
     def get_paths():
-        for result_or_future in return_final_result(lambda: inner(path)):
-            if condition is None:
-                yield result_or_future
-                continue
+        with closing(PrintStatus(fp=sys.stderr)) as print_status:
+            for path_with_groups in return_final_result(lambda: inner(path)):
+                current_root_path, groups_with_progress = path_with_groups
 
-            _, current_groups = result_or_future
+                if groups_with_progress:
+                    status = current_root_path
+                    for group_with_progress in groups_with_progress:
+                        _, progress = group_with_progress
+                        status += ' %s/%s' % progress
 
-            def eval_and_get(path_condition_expended, result):
-                condition_value = firebase_root.get(path_condition_expended)
-                if condition_value is None:
-                    return None
+                    print_status.print_status(status)
 
-                return result
+                if test_eval is None:
+                    yield path_with_groups
+                    continue
 
-            condition_expended = fill_wildcards(condition, current_groups)
+                value = firebase_root.get(current_root_path)
 
-            yield gevent.spawn(eval_and_get, condition_expended, result_or_future)
+                try:
+                    if test_eval and not eval(test_eval, {}, value):
+                        continue
+                except TypeError:
+                    print('%s: Error while eval value: %s' % (current_root_path, value,))
+                    raise
 
-    for result in return_final_result(lambda: get_paths()):
+                yield path_with_groups
+
+    for result in return_final_result(get_paths):
         yield result
 
 
