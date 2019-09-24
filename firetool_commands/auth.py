@@ -3,7 +3,7 @@ import os
 
 import datetime
 from oauth2client.client import OAuth2Credentials
-from firetool_commands.common import PlainFirebaseRoot
+from firetool_commands.common import PlainFirebaseRoot, PlainFirestoreRoot
 from firetool_commands.configstore import Configstore
 
 client_id = os.environ.get(
@@ -28,6 +28,14 @@ def get_cred():
 def get_firebase(project):
     c = get_cred()
     firebase = PlainFirebaseRoot('https://{project}.firebaseio.com/'.format(project=project))
+    firebase.set_credentials(c)
+
+    return firebase
+
+
+def get_firestore(project, database='(default)'):
+    c = get_cred()
+    firebase = PlainFirestoreRoot('https://firestore.googleapis.com/v1/projects/{project}/databases/{database}/documents/'.format(project=project, database=database))
     firebase.set_credentials(c)
 
     return firebase

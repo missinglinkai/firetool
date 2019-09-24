@@ -1,17 +1,16 @@
 # coding=utf-8
+import abc
 import json
 import logging
 import math
+
+import six
+from six.moves.urllib.parse import urljoin, urlencode
 
 try:
     import httplib
 except ImportError:
     import http.client as httplib
-
-try:
-    from urlparse import urljoin
-except ImportError:
-    from urllib.parse import urljoin
 
 
 def _json_handler(obj):
@@ -27,12 +26,11 @@ def _json_handler(obj):
     raise TypeError('Object of type %s with value of %s is not JSON serializable' % (type(obj), repr(obj)))
 
 
-class FirebaseRootCore(object):
-    gets = 0
-
-    def __init__(self, firebase_root):
+@six.add_metaclass(abc.ABCMeta)
+class HttpRootCore(object):
+    def __init__(self, api_root):
         self._http = None
-        self._firebase_root = firebase_root
+        self._api_root = api_root
 
     def get_http(self):
         return None
@@ -47,6 +45,122 @@ class FirebaseRootCore(object):
 
     def set_credentials(self, credentials):
         self._http = credentials.authorize(self.http)
+
+    @abc.abstractmethod
+    def _get(self, *args, **kwargs):
+        """
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+
+    @abc.abstractmethod
+    def _put(self, path, value, **kwargs):
+        """
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+
+    def put(self, path, value, **kwargs):
+        return self._put(path, value, **kwargs)
+
+    def get(self, *args, **kwargs):
+        post_process = kwargs.get('post_process')
+
+        result = self._get(*args, **kwargs)
+
+        if post_process is None:
+            return result
+
+        return post_process(result)
+
+    def build_path(self, *args):
+        path = self.api_root()
+
+        for arg in args[:-1]:
+            path = urljoin(path, str(arg))
+            path += "/"
+
+        path = urljoin(path, str(args[-1]))
+
+        if path.endswith("/"):
+            path = path[:-1]
+
+        return path
+
+    def api_root(self):
+        return self._api_root
+
+
+class FirestoreRootCore(HttpRootCore):
+    def _put(self, path, value, **kwargs):
+        path, field = path.rsplit('/', 1)
+        url = self.build_path(path)
+        body = {
+            'fields': {
+                field: {'stringValue': value}  # HARDCODE string value
+            }
+        }
+
+        params = {
+            'updateMask.fieldPaths': field
+        }
+
+        headers = {'Content-type': 'application/json'}
+
+        r = self.on_request(url, 'PATCH', json.dumps(body), params=params, headers=headers)
+
+        return r
+
+    def _get(self, *args, **kwargs):
+        url = self.build_path(*args)
+
+        def get_child_name(doc):
+            name = doc['name']
+
+            name = 'https://firestore.googleapis.com/v1/' + name
+
+            return name[len(url) + 1:]
+
+        r = self.on_request(url, 'GET')
+
+        documents = r.get('documents', [])
+
+        key_names = map(get_child_name, documents)
+
+        return key_names
+
+    @classmethod
+    def validate_http_response(cls, response, content):
+        if response.status >= 400:
+            raise httplib.HTTPException(content, response)
+
+    def on_request(self, url, method, body=None, headers=None, params=None):
+        if method == 'NOPE':
+            return {}
+
+        if params:
+            url = '%s?%s' % (url, urlencode(params))
+
+        res, content = self.http.request(url, method=method, body=body, headers=headers)
+        self.validate_http_response(res, content)
+
+        return json.loads(content.decode('utf8'))
+
+
+class FirebaseRootCore(HttpRootCore):
+    gets = 0
+
+    def build_url(self, *args):
+        path = self.build_path(*args)
+
+        if path.endswith(".json"):
+            return path
+
+        return path + "/.json"
 
     @classmethod
     def common_path(cls, a, b):
@@ -71,77 +185,6 @@ class FirebaseRootCore(object):
 
         return p
 
-    def firebase_root(self):
-        return self._firebase_root
-
-    @classmethod
-    def validate_http_response(cls, response, content):
-        if response.status >= 400:
-            raise httplib.HTTPException(content, response)
-
-    def on_request(self, url, method, body, headers):
-        if method == 'NOPE':
-            return {}
-
-        res, content = self.http.request(url, method=method, body=body, headers=headers)
-        self.validate_http_response(res, content)
-
-        return json.loads(content.decode('utf8'))
-
-    def _json_method_url(self, method, path, params):
-        url = self.build_url(path)
-
-        body = None
-        headers = None
-
-        if method != 'GET':
-            json_str = json.dumps(params, default=_json_handler)
-            body = json_str
-            headers = {"Content-Type": "application/json"}
-        elif 'shallow' in params:
-            shallow = params.get('shallow')
-            del params['shallow']
-
-            if shallow:
-                url += '?shallow=true'
-
-        while True:
-            try:
-                r = self.on_request(url, method, body, headers)
-                break
-            except httplib.HTTPException as ex:
-                content, r = ex.args
-
-                if r.status == 504:
-                    print('%s, retrying' % (content, ))
-                    continue
-
-                logging.error("request failed %d %s", r.status, content)
-                logging.error("The following request failed: (%s) %s\nbody: %s\nheaders: %s", method, url, body, headers)
-                raise
-
-        return r
-
-    def json_method(self, method, *args, **kwargs):
-        if kwargs or method == 'GET':
-            url = self.build_path(*args)
-            return self._json_method_url(method, url, kwargs)
-        else:
-            url = self.build_path(*args[:-1]) if len(args) > 1 else self.build_path(*args)
-            return self._json_method_url(method, url, args[-1])
-
-    def get(self, *args, **kwargs):
-        post_process = kwargs.get('post_process')
-        result = self.json_method("GET", *args, **kwargs)
-
-        if post_process is None:
-            return result
-
-        return post_process(result)
-
-    def put(self, *args, **kwargs):
-        return self.json_method("PUT", *args, **kwargs)
-
     def delete(self, *args, **kwargs):
         return self.json_method("DELETE", *args, **kwargs)
 
@@ -158,28 +201,6 @@ class FirebaseRootCore(object):
     def subtract_paths(cls, d, common_path):
         return {cls.subtract_path(common_path, k): v for k, v in d.items()}
 
-    def build_url(self, *args):
-        path = self.build_path(*args)
-
-        if path.endswith(".json"):
-            return path
-
-        return path + "/.json"
-
-    def build_path(self, *args):
-        path = self.firebase_root()
-
-        for arg in args[:-1]:
-            path = urljoin(path, str(arg))
-            path += "/"
-
-        path = urljoin(path, str(args[-1]))
-
-        if path.endswith("/"):
-            path = path[:-1]
-
-        return path
-
     def flatten_data(self, big_patch, path, common_path, current_data, current_path=None):
         for k, v in current_data.items():
             key_current_path = (current_path or [])[:]
@@ -191,3 +212,17 @@ class FirebaseRootCore(object):
 
             path_with_key = self.build_path(path, *key_current_path)
             big_patch[self.subtract_path(common_path, path_with_key)] = v
+
+    def json_method(self, method, *args, **kwargs):
+        if kwargs or method == 'GET':
+            url = self.build_path(*args)
+            return self._json_method_url(method, url, kwargs)
+        else:
+            url = self.build_path(*args[:-1]) if len(args) > 1 else self.build_path(*args)
+            return self._json_method_url(method, url, args[-1])
+
+    def _get(self, *args, **kwargs):
+        return self.json_method("GET", *args, **kwargs)
+
+    def _put(self, path, value, **kwargs):
+        return self.json_method("PUT", path, value, **kwargs)

@@ -9,7 +9,7 @@ import re
 import requests
 from gevent.pool import Pool
 
-from firetool_commands.base_root_core import FirebaseRootCore
+from .base_root_core import FirebaseRootCore, FirestoreRootCore
 
 
 def fill_wildcards(p, groups, values=None):
@@ -152,7 +152,19 @@ class PlainFirebaseRoot(FirebaseRootCore):
         self.pool = Pool(50)
 
     def get_http(self):
-        return RequestsWrapper(self._firebase_root)
+        return RequestsWrapper(self._api_root)
+
+    def spawn(self, *args, **kwargs):
+        return self.pool.spawn(*args, **kwargs)
+
+
+class PlainFirestoreRoot(FirestoreRootCore):
+    def __init__(self, firebase_root):
+        super(PlainFirestoreRoot, self).__init__(firebase_root)
+        self.pool = Pool(50)
+
+    def get_http(self):
+        return RequestsWrapper(self._api_root)
 
     def spawn(self, *args, **kwargs):
         return self.pool.spawn(*args, **kwargs)
@@ -267,7 +279,7 @@ def iterate_path(firebase_root, path, keys_only=False, test_eval=None, descendin
 
                 pattern = elements[1]
 
-                children_names = children_names.keys()
+                children_names = children_names.keys() if isinstance(children_names, dict) else children_names # TODO firebase needs to return a lsit
 
                 children_names = sorted(children_names, reverse=descending_order, key=natural_key)
 
