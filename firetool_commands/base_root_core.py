@@ -125,9 +125,25 @@ class FirestoreRootCore(HttpRootCore):
 
             return name[len(url) + 1:]
 
-        r = self.on_request(url, 'GET')
+        documents = []
 
-        documents = r.get('documents', [])
+        page_token = None
+        while True:
+            params = {
+                'mask.fieldPaths': 'name',
+                'pageSize': 100,
+            }
+
+            if page_token is not None:
+                params['pageToken'] = page_token
+
+            r = self.on_request(url, 'GET', params=params)
+
+            documents.extend(r.get('documents', []))
+            page_token = r.get('nextPageToken')
+
+            if page_token is None:
+                break
 
         key_names = map(get_child_name, documents)
 
