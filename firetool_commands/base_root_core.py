@@ -1,8 +1,8 @@
 # coding=utf-8
 import abc
 import json
-import logging
 import math
+import dateutil.parser
 
 import six
 from six.moves.urllib.parse import urljoin, urlencode
@@ -56,6 +56,15 @@ class HttpRootCore(object):
         """
 
     @abc.abstractmethod
+    def _get_document(self, *args, **kwargs):
+        """
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+
+    @abc.abstractmethod
     def _put(self, path, value, **kwargs):
         """
 
@@ -71,6 +80,16 @@ class HttpRootCore(object):
         post_process = kwargs.get('post_process')
 
         result = self._get(*args, **kwargs)
+
+        if post_process is None:
+            return result
+
+        return post_process(result)
+
+    def get_document(self, *args, **kwargs):
+        post_process = kwargs.get('post_process')
+
+        result = self._get_document(*args, **kwargs)
 
         if post_process is None:
             return result
@@ -99,9 +118,19 @@ class FirestoreRootCore(HttpRootCore):
     def _put(self, path, value, **kwargs):
         path, field = path.rsplit('/', 1)
         url = self.build_path(path)
+
+        value_type = None
+        if isinstance(value, six.string_types):
+            value_type = 'stringValue'
+        elif isinstance(value, bool):
+            value_type = 'booleanValue'
+
+        if value_type is None:
+            raise Exception('Unknown type %s' % (type(value)))
+
         body = {
             'fields': {
-                field: {'stringValue': value}  # HARDCODE string value
+                field: {value_type: value}
             }
         }
 
@@ -114,6 +143,50 @@ class FirestoreRootCore(HttpRootCore):
         r = self.on_request(url, 'PATCH', json.dumps(body), params=params, headers=headers)
 
         return r
+
+    @classmethod
+    def _convert_val(cls, val_type, val_value):
+        if val_type == 'stringValue':
+            return val_value
+
+        if val_type == 'timestampValue':
+            return dateutil.parser.parse(val_value)
+
+        if val_type == 'integerValue':
+            return int(val_value)
+
+        if val_type == 'doubleValue':
+            return float(val_value)
+
+        if val_type == 'arrayValue':
+            return [cls._convert_val(item.keys()[0], item.values()[0]) for item in val_value.get('values')]
+
+        if val_type == 'nullValue':
+            return None
+
+        if val_type == 'booleanValue':
+            return bool(val_value)
+
+        if val_type == 'mapValue':
+            return cls._native_dict(val_value.get('fields'))
+
+        raise Exception('unknown type {val_type}'.format(val_type=val_type))
+
+    @classmethod
+    def _native_dict(cls, d):
+        result = {}
+        for key, val in d.items():
+            for val_type, val_value in val.items():
+                result[key] = cls._convert_val(val_type, val_value)
+
+        return result
+
+    def _get_document(self, *args, **kwargs):
+        url = self.build_path(*args)
+
+        r = self.on_request(url, 'GET')
+
+        return self._native_dict(r.get('fields'))
 
     def _get(self, *args, **kwargs):
         url = self.build_path(*args)
@@ -239,6 +312,8 @@ class FirebaseRootCore(HttpRootCore):
 
     def _get(self, *args, **kwargs):
         return self.json_method("GET", *args, **kwargs)
+
+    _get_document = _get
 
     def _put(self, path, value, **kwargs):
         return self.json_method("PUT", path, value, **kwargs)

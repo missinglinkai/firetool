@@ -316,7 +316,7 @@ def iterate_path(firebase_root, path, keys_only=False, test_eval=None, descendin
                     yield path_with_groups
                     continue
 
-                value = firebase_root.get(current_root_path)
+                value = firebase_root.get_document(current_root_path)
 
                 try:
                     if test_eval and not eval(test_eval, {}, value):
