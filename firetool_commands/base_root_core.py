@@ -1,6 +1,7 @@
 # coding=utf-8
 import abc
 import json
+import logging
 import math
 import dateutil.parser
 
@@ -113,6 +114,23 @@ class HttpRootCore(object):
     def api_root(self):
         return self._api_root
 
+    def on_request(self, url, method, body=None, headers=None, params=None):
+        if method == 'NOPE':
+            return {}
+
+        if params:
+            url = '%s?%s' % (url, urlencode(params))
+
+        res, content = self.http.request(url, method=method, body=body, headers=headers)
+        self.validate_http_response(res, content)
+
+        return json.loads(content.decode('utf8'))
+
+    @classmethod
+    def validate_http_response(cls, response, content):
+        if response.status >= 400:
+            raise httplib.HTTPException(content, response)
+
 
 class FirestoreRootCore(HttpRootCore):
     def _put(self, path, value, **kwargs):
@@ -222,23 +240,6 @@ class FirestoreRootCore(HttpRootCore):
 
         return key_names
 
-    @classmethod
-    def validate_http_response(cls, response, content):
-        if response.status >= 400:
-            raise httplib.HTTPException(content, response)
-
-    def on_request(self, url, method, body=None, headers=None, params=None):
-        if method == 'NOPE':
-            return {}
-
-        if params:
-            url = '%s?%s' % (url, urlencode(params))
-
-        res, content = self.http.request(url, method=method, body=body, headers=headers)
-        self.validate_http_response(res, content)
-
-        return json.loads(content.decode('utf8'))
-
 
 class FirebaseRootCore(HttpRootCore):
     gets = 0
@@ -317,3 +318,37 @@ class FirebaseRootCore(HttpRootCore):
 
     def _put(self, path, value, **kwargs):
         return self.json_method("PUT", path, value, **kwargs)
+
+    def _json_method_url(self, method, path, params):
+        url = self.build_url(path)
+
+        body = None
+        headers = None
+
+        if method != 'GET':
+            json_str = json.dumps(params, default=_json_handler)
+            body = json_str
+            headers = {"Content-Type": "application/json"}
+        elif 'shallow' in params:
+            shallow = params.get('shallow')
+            del params['shallow']
+
+            if shallow:
+                url += '?shallow=true'
+
+        while True:
+            try:
+                r = self.on_request(url, method, body, headers)
+                break
+            except httplib.HTTPException as ex:
+                content, r = ex.args
+
+                if r.status == 504:
+                    print('%s, retrying' % (content, ))
+                    continue
+
+                logging.error("request failed %d %s", r.status, content)
+                logging.error("The following request failed: (%s) %s\nbody: %s\nheaders: %s", method, url, body, headers)
+                raise
+
+        return r
